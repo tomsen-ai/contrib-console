@@ -728,8 +728,11 @@ PAGE = r"""<!doctype html>
   .mclose { margin-left: auto; }
   .mbar { display: flex; align-items: center; gap: 6px; padding: 14px 0 0; }
   .mbar .mrepo { color: var(--faint); font-size: 12px; }
-  .thead, .tr1 { display: grid; grid-template-columns: 64px 44px minmax(0,1fr) 86px 112px 64px;
+  .thead, .tr1 { display: grid; grid-template-columns: 64px 44px minmax(0,1fr) 86px 112px 58px 64px;
                  gap: 10px; align-items: center; }
+  .tacts { opacity: 0; transition: opacity .12s; text-align: right; }
+  .trow:hover .tacts { opacity: 1; }
+  .tacts button { font-size: 11px; padding: 0 8px; }
   .thead { color: var(--faint); font-size: 11px; border-bottom: 1px solid var(--line);
            padding: 6px 12px; position: sticky; top: 0; background: #101114; z-index: 1; }
   .trow { padding: 8px 12px; border-radius: 8px; cursor: pointer; transition: background .12s; }
@@ -1039,6 +1042,9 @@ function buildTasks(r) {
       unread: list.some(i => i.unread),
       mine: list.some(i => i.ball === "mine"),
       open: list.some(i => i.state === "OPEN"),
+      done: list.every(i => i.triage === "done"),      // 手动"已处理"
+      flagged: list.some(i => i.triage === "todo"),    // 手动拉回待处理
+
       watch: list.some(i => i.my_role === "watcher"),
       lastTs: list.map(i => i.last_activity_at || i.updated_at || i.created_at || "")
                   .sort().slice(-1)[0],
@@ -1120,6 +1126,21 @@ function taskDomain(t) {
   return s.length > 26 ? s.slice(0, 26) + '…' : s;
 }
 function setTaskFilter(f) { taskFilter = taskFilter === f ? null : f; renderModal(); }
+
+// 状态切换:待处理 →「已处理」压到等待中;等待中 →「拉回」待处理。
+// 对面再有新动静会自动弹回待处理(后端 done 遇新事件重置为 unread)。
+async function setTaskTriage(ev, key, triage) {
+  ev.stopPropagation();
+  const t = buildTasks(groupData()[openRepo] || {todo: [], stale: [], closed: [], idle: []})
+    .find(x => x.key === key);
+  if (!t) return;
+  for (const it of t.list) {
+    if (triage === 'done') await api('/api/item/' + it.id + '/seen', {});
+    await api('/api/item/' + it.id + '/triage',
+              {triage, snooze_until: it.snooze_until, next_action: it.next_action});
+  }
+  reload();
+}
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
 
 function section(title, html) { return html ? '<h2>' + title + '</h2>' + html : ''; }
@@ -1178,11 +1199,13 @@ function renderModal() {
   const shown = tasks;
   if (shown.length) {
     h += '<div class="thead"><span>状态</span><span>种类</span><span>领域</span>'
-      + '<span>Issue</span><span>PR</span><span style="text-align:right">最后动静</span></div>';
-    // 三分区:待处理(该我动 + 有新动静的)最前,等待中只放安静等对面的,已解决最后
+      + '<span>Issue</span><span>PR</span><span></span>'
+      + '<span style="text-align:right">最后动静</span></div>';
+    // 三分区:待处理(该我动/有新动静/手动拉回,且没被标已处理)最前,已解决最后
+    const pend = t => t.open && !t.done && (t.mine || t.unread || t.flagged);
     const groups = [
-      ['待处理', shown.filter(t => t.open && (t.mine || t.unread))],
-      ['等待中', shown.filter(t => t.open && !t.mine && !t.unread)],
+      ['待处理', shown.filter(pend)],
+      ['等待中', shown.filter(t => t.open && !pend(t))],
       ['已解决', shown.filter(t => !t.open)],
     ];
     for (const [label, list] of groups) {
@@ -1190,6 +1213,12 @@ function renderModal() {
       h += '<div class="tgroup">' + label + ' · ' + list.length + '</div>';
       for (const t of list) {
         const st = taskStatus(t);
+        // 状态切换按钮(悬停出现):待处理→已处理压下去,等待中→拉回
+        let act = '';
+        if (label === '待处理')
+          act = '<button onclick="setTaskTriage(event,\'' + t.key + '\',\'done\')">已处理</button>';
+        else if (label === '等待中')
+          act = '<button onclick="setTaskTriage(event,\'' + t.key + '\',\'todo\')">拉回</button>';
         // 已解决的不抢注意力:未读高亮只给还开着的任务
         h += '<div class="trow' + (t.unread && t.open ? ' unread' : '') + (t.open ? '' : ' done')
           + '" onclick="toggleTask(\'' + t.key + '\')">'
@@ -1199,6 +1228,7 @@ function renderModal() {
           + '<span class="ttitle">' + (t.watch ? icon("eye") + ' ' : '') + esc(taskDomain(t)) + '</span>'
           + '<span class="chips">' + t.issues.map(chip).join('') + '</span>'
           + '<span class="chips">' + t.prs.map(chip).join('') + '</span>'
+          + '<span class="tacts">' + act + '</span>'
           + '<span class="age" style="text-align:right">' + fmtRel(t.lastTs) + '</span></div></div>';
         if (expandedTask === t.key) {
           h += '<div class="tdetail">' + t.list.map(it =>
