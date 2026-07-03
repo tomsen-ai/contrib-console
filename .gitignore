@@ -1,0 +1,10 @@
+# 个人数据,不进仓库
+contrib.db
+contrib.db-journal
+
+# 本机相关
+com.tomsen.contrib-console.plist
+*.log
+__pycache__/
+*.pyc
+.DS_Store
