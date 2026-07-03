@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 ME = "tomsen-ai"
@@ -165,13 +166,48 @@ def gh_json(args, errors=None):
 
 # ---------------------------------------------------------------- sweep
 
-def _clean_body(body):
-    """摘要用:去 HTML 标签、压空白,截150字符;纯图片评论给个占位。"""
-    text = re.sub(r"<[^>]+>", "", body or "")
-    text = re.sub(r"\s+", " ", text).strip()[:150]
+def _clean_body(body, limit=150):
+    """摘要用:去 HTML 标签、压空白,截断;纯图片评论给个占位。"""
+    text = re.sub(r"<[^>]*>?", "", body or "")
+    text = re.sub(r"\s+", " ", text).strip()[:limit]
     if not text and (body or "").strip():
         return "(图片/附件)"
     return text
+
+
+def fetch_thread(repo, number, typ):
+    """拉取单个 issue/PR 的完整人工对话:开题 + 评论 + review,按时间排序。"""
+    errors = []
+    if typ == "pr":
+        data = gh_json(["pr", "view", str(number), "--repo", repo, "--json",
+                        "body,author,createdAt,comments,reviews"], errors)
+    else:
+        data = gh_json(["issue", "view", str(number), "--repo", repo, "--json",
+                        "body,author,createdAt,comments"], errors)
+    if data is None:
+        return None, errors
+    entries = [{
+        "ts": data.get("createdAt"),
+        "author": (data.get("author") or {}).get("login") or "?",
+        "kind": "开题",
+        "text": _clean_body(data.get("body"), 600),
+    }]
+    for c in data.get("comments") or []:
+        a = (c.get("author") or {}).get("login") or ""
+        if not a or BOT_RE.search(a):
+            continue
+        entries.append({"ts": c.get("createdAt"), "author": a, "kind": "评论",
+                        "text": _clean_body(c.get("body"), 600)})
+    if typ == "pr":
+        for rv in data.get("reviews") or []:
+            a = (rv.get("author") or {}).get("login") or ""
+            if not a or BOT_RE.search(a):
+                continue
+            entries.append({"ts": rv.get("submittedAt"), "author": a,
+                            "kind": "review " + (rv.get("state") or ""),
+                            "text": _clean_body(rv.get("body"), 600)})
+    entries.sort(key=lambda e: e["ts"] or "")
+    return entries, errors
 
 
 def _parse_timeline(data, is_pr):
@@ -492,6 +528,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._json(build_dashboard(conn))
             finally:
                 conn.close()
+        elif self.path.startswith("/api/thread?"):
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            repo = (qs.get("repo") or [""])[0]
+            number = (qs.get("number") or [""])[0]
+            typ = (qs.get("type") or ["issue"])[0]
+            if not repo or not number.isdigit() or typ not in ("pr", "issue"):
+                self._json({"error": "需要 repo/number/type"}, 400)
+                return
+            entries, errors = fetch_thread(repo, int(number), typ)
+            if entries is None:
+                self._json({"error": "; ".join(errors) or "抓取失败"}, 502)
+            else:
+                self._json({"entries": entries})
         elif self.path == "/favicon.ico":
             self.send_response(204)
             self.end_headers()
@@ -761,16 +810,12 @@ PAGE = r"""<!doctype html>
   .chip.cmerged { color: #a78bfa; }
   .chip.cclosed { color: var(--faint); }
   .chip.cunread { color: var(--accent); background: rgba(94,106,210,.13); }
-  .tdetail { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-             margin: 6px 2px 12px; padding: 8px 10px; }
-  .tlog { margin: 6px 4px 2px 18px; }
-  .tlogrow { display: flex; gap: 10px; align-items: baseline; font-size: 12px;
-             color: var(--dim); padding: 2px 0; }
-  .tlogrow.fresh .tkind { color: var(--accent); }
-  .tkind { flex: none; width: 52px; color: var(--faint); font-size: 11px; }
-  .tlogrow .age { flex: none; width: 76px; }
-  .tsum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .tsum b { color: var(--fg); font-weight: 500; }
+  .hentry { display: flex; gap: 12px; padding: 7px 2px; border-top: 1px solid rgba(255,255,255,.04); }
+  .hentry:first-of-type { border-top: none; }
+  .hmeta { flex: none; width: 132px; color: var(--faint); font-size: 11.5px; line-height: 1.5; }
+  .htext { min-width: 0; color: var(--dim); font-size: 12.5px; line-height: 1.55;
+           word-break: break-word; }
+  .htext b { color: var(--fg); font-weight: 500; }
   #errors { color: var(--red); font-size: 12px; margin-top: 8px; white-space: pre-wrap; }
 </style>
 </head>
@@ -792,9 +837,10 @@ let openRepo = null;
 let dragEl = null;
 let pendingOpen = false;   // 收编弹层
 let adoptRepo = null;      // 正在填收编表单的 repo
-let expandedTask = null;   // 任务表里展开详情的任务 key
+let detailTask = null;     // 二级详情卡片打开的任务 key
 let watchFormOpen = false; // 添加盯梢表单是否展开
-let taskFilter = null;     // 顶部标签筛选(种类/领域)
+let taskFilter = null;     // (已弃用的筛选状态,保留避免残留引用报错)
+const threadCache = {};    // "repo#num" → entries 数组 | 'loading'
 
 // 手绘 SVG 图标(16x16 线稿)
 const ICONS = {
@@ -1004,16 +1050,26 @@ function cardHtml(r) {
 }
 
 function openModal(repo) {
-  pendingOpen = false; openRepo = repo; expandedTask = null; watchFormOpen = false; taskFilter = null;
+  pendingOpen = false; openRepo = repo; detailTask = null; watchFormOpen = false;
   renderModal();
 }
 function closeModal() {
-  openRepo = null; pendingOpen = false; adoptRepo = null; expandedTask = null;
-  watchFormOpen = false; taskFilter = null;
+  openRepo = null; pendingOpen = false; adoptRepo = null; detailTask = null; watchFormOpen = false;
   document.getElementById("modalroot").innerHTML = "";
 }
-function toggleTask(key) { expandedTask = expandedTask === key ? null : key; renderModal(); }
+function openTaskDetail(key) { detailTask = key; renderModal(); }
+function closeTaskDetail() { detailTask = null; renderModal(); }
 function toggleWatchForm() { watchFormOpen = !watchFormOpen; renderModal(); }
+// 拉取完整对话(带缓存);拉完重渲染
+function ensureThread(it) {
+  const k = it.repo + '#' + it.number;
+  if (threadCache[k]) return;
+  threadCache[k] = 'loading';
+  fetch('/api/thread?repo=' + encodeURIComponent(it.repo) + '&number=' + it.number + '&type=' + it.type)
+    .then(r => r.json())
+    .then(d => { threadCache[k] = d.entries || []; renderModal(); })
+    .catch(() => { threadCache[k] = []; renderModal(); });
+}
 
 // 任务归组:同 repo 内,PR 声明 closes/fixes 的 issue(closingIssuesReferences)并成一个任务
 function buildTasks(r) {
@@ -1080,26 +1136,6 @@ function fmtRel(iso) {
   if (m < 1440) return Math.round(m / 60) + '小时前';
   return Math.round(m / 1440) + '天前';
 }
-const KIND_LABEL = {new_comment: '评论', new_review: 'review', state_change: '状态',
-                    label_change: '标签', ci_change: 'CI', assignee_change: '指派',
-                    watch_trigger: '盯梢触发'};
-// 任务展开区的"记录"时间线:该任务所有 issue/PR 的事件合并,按时间倒序
-function taskLog(t) {
-  const evs = [];
-  for (const it of t.list)
-    for (const e of it.events || []) evs.push({...e, number: it.number});
-  if (!evs.length) return '';
-  evs.sort((a, b) => a.ts < b.ts ? 1 : -1);
-  const multi = t.list.length > 1;
-  return '<div class="tlog">' + evs.slice(0, 12).map(e =>
-    '<div class="tlogrow' + (e.seen ? '' : ' fresh') + '">'
-    + '<span class="age">' + fmtTime(e.ts) + '</span>'
-    + '<span class="tkind">' + (KIND_LABEL[e.kind] || esc(e.kind)) + '</span>'
-    + (multi ? '<span class="age">#' + e.number + '</span>' : '')
-    + '<span class="tsum">' + (e.actor ? '<b>' + esc(e.actor) + '</b> ' : '')
-    + esc((e.summary || '').slice(0, 90)) + '</span></div>').join('') + '</div>';
-}
-
 // 极简列表行:只标种类和领域,细节全在点击后的详情卡片里
 function taskKind(t) {
   const has = re => t.list.some(i => re.test(i.title || ''));
@@ -1141,7 +1177,9 @@ async function setTaskTriage(ev, key, triage) {
   }
   reload();
 }
-document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") { if (detailTask) closeTaskDetail(); else closeModal(); }
+});
 
 function section(title, html) { return html ? '<h2>' + title + '</h2>' + html : ''; }
 
@@ -1221,7 +1259,7 @@ function renderModal() {
           act = '<button onclick="setTaskTriage(event,\'' + t.key + '\',\'todo\')">拉回</button>';
         // 已解决的不抢注意力:未读高亮只给还开着的任务
         h += '<div class="trow' + (t.unread && t.open ? ' unread' : '') + (t.open ? '' : ' done')
-          + '" onclick="toggleTask(\'' + t.key + '\')">'
+          + '" onclick="openTaskDetail(\'' + t.key + '\')">'
           + '<div class="tr1">'
           + '<span><span class="pill ' + st[1] + '">' + st[0] + '</span></span>'
           + '<span class="tkindcol">' + taskKind(t) + '</span>'
@@ -1230,17 +1268,47 @@ function renderModal() {
           + '<span class="chips">' + t.prs.map(chip).join('') + '</span>'
           + '<span class="tacts">' + act + '</span>'
           + '<span class="age" style="text-align:right">' + fmtRel(t.lastTs) + '</span></div></div>';
-        if (expandedTask === t.key) {
-          h += '<div class="tdetail">' + t.list.map(it =>
-            itemRow(it, {todo: it.ball === 'mine', wait: it.ball === 'theirs'})).join('')
-            + taskLog(t) + '</div>';
-        }
       }
     }
   } else {
-    h += '<div class="empty">' + (taskFilter ? '该标签下没有任务。' : '该项目暂无条目。') + '</div>';
+    h += '<div class="empty">该项目暂无条目。</div>';
   }
-  root.innerHTML = h + '</div></div></div>';
+  h += '</div></div></div>';
+
+  // 二级详情卡片:完整过程——开题说了什么、谁回复了什么、review 结论
+  if (detailTask) {
+    const t = tasks.find(x => x.key === detailTask);
+    if (t) {
+      t.list.forEach(ensureThread);
+      const st = taskStatus(t);
+      let entries = [], loading = false;
+      for (const it of t.list) {
+        const th = threadCache[it.repo + '#' + it.number];
+        if (th === 'loading') loading = true;
+        else if (Array.isArray(th)) entries.push(...th.map(e => ({...e, number: it.number})));
+      }
+      entries.sort((a, b) => (a.ts || '') < (b.ts || '') ? -1 : 1);
+      const multi = t.list.length > 1;
+      let body;
+      if (loading) body = '<div class="empty">拉取完整对话中…</div>';
+      else if (!entries.length) body = '<div class="empty">还没有人工发言。</div>';
+      else body = entries.map(e =>
+        '<div class="hentry"><span class="hmeta">' + fmtTime(e.ts)
+        + (multi ? ' · #' + e.number : '') + '<br>' + esc(e.kind) + '</span>'
+        + '<span class="htext"><b>' + esc(e.author) + '</b>'
+        + (e.text ? ' — ' + esc(e.text) : '') + '</span></div>').join('');
+      h += '<div class="overlay" onclick="if(event.target===this)closeTaskDetail()">'
+        + '<div class="modal" style="max-width:700px">'
+        + '<div class="mbar"><span class="pill ' + st[1] + '">' + st[0] + '</span>'
+        + '<span class="mrepo">' + esc(taskDomain(t)) + '</span><span class="spacer"></span>'
+        + '<button onclick="closeTaskDetail()">' + icon('x') + '</button></div>'
+        + '<div class="mbody">'
+        + t.list.map(it => itemRow(it, {todo: it.ball === 'mine', wait: it.ball === 'theirs'})).join('')
+        + '<h2>过程</h2>' + body
+        + '</div></div></div>';
+    }
+  }
+  root.innerHTML = h;
 }
 
 function render() {
