@@ -316,6 +316,11 @@ def sweep(verbose=False):
     for it in res or []:
         if (it.get("closedAt") or "") >= week_ago:
             discovered.append((it["repository"]["nameWithOwner"], it["number"], "pr"))
+    res = gh_json(["search", "issues", "--author", ME, "--state", "closed",
+                   "--json", "repository,number,closedAt", "--limit", "30"], errors)
+    for it in res or []:
+        if (it.get("closedAt") or "") >= week_ago:
+            discovered.append((it["repository"]["nameWithOwner"], it["number"], "issue"))
 
     for repo, number, typ in discovered:
         if repo.startswith(ME + "/"):
@@ -732,6 +737,7 @@ PAGE = r"""<!doctype html>
   .trow:hover { background: rgba(255,255,255,.035); }
   .trow.unread { background: rgba(94,106,210,.07); box-shadow: inset 2px 0 0 var(--accent); }
   .trow.unread:hover { background: rgba(94,106,210,.11); }
+  .trow.done { opacity: .68; }
   .tkindcol { color: var(--faint); font-size: 12px; }
   .tgroup { color: var(--faint); font-size: 11px; font-weight: 600; letter-spacing: .06em;
             padding: 14px 12px 3px; }
@@ -1165,29 +1171,18 @@ function renderModal() {
       + '<button>添加</button></form>';
   }
   const tasks = buildTasks(r);
-
-  // 标签筛选条(种类 + 领域,点击过滤,再点取消)
-  const facets = [...new Set([].concat(tasks.map(taskKind), tasks.map(taskDomain)))];
-  if (tasks.length > 3) {
-    h += '<div class="fbar">' + facets.map(f =>
-      '<span class="fchip' + (taskFilter === f ? ' on' : '') + '" onclick="setTaskFilter(\''
-      + esc(f) + '\')">' + esc(f) + '</span>').join('') + '</div>';
-  }
-
   h += '<div class="mbody">';
   h += section(icon("eye") + '盯梢触发 <span class="count">' + r.trigs.length + '</span>',
                r.trigs.map(trigRow).join(''));
 
-  const shown = taskFilter
-    ? tasks.filter(t => taskKind(t) === taskFilter || taskDomain(t) === taskFilter)
-    : tasks;
+  const shown = tasks;
   if (shown.length) {
     h += '<div class="thead"><span>状态</span><span>种类</span><span>领域</span>'
       + '<span>Issue</span><span>PR</span><span style="text-align:right">最后动静</span></div>';
-    // 三分区:待处理(该我动)最前,等待中居中,已解决最后
+    // 三分区:待处理(该我动 + 有新动静的)最前,等待中只放安静等对面的,已解决最后
     const groups = [
-      ['待处理', shown.filter(t => t.mine)],
-      ['等待中', shown.filter(t => !t.mine && t.open)],
+      ['待处理', shown.filter(t => t.open && (t.mine || t.unread))],
+      ['等待中', shown.filter(t => t.open && !t.mine && !t.unread)],
       ['已解决', shown.filter(t => !t.open)],
     ];
     for (const [label, list] of groups) {
@@ -1195,7 +1190,9 @@ function renderModal() {
       h += '<div class="tgroup">' + label + ' · ' + list.length + '</div>';
       for (const t of list) {
         const st = taskStatus(t);
-        h += '<div class="trow' + (t.unread ? ' unread' : '') + '" onclick="toggleTask(\'' + t.key + '\')">'
+        // 已解决的不抢注意力:未读高亮只给还开着的任务
+        h += '<div class="trow' + (t.unread && t.open ? ' unread' : '') + (t.open ? '' : ' done')
+          + '" onclick="toggleTask(\'' + t.key + '\')">'
           + '<div class="tr1">'
           + '<span><span class="pill ' + st[1] + '">' + st[0] + '</span></span>'
           + '<span class="tkindcol">' + taskKind(t) + '</span>'
