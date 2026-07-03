@@ -1035,13 +1035,15 @@ function badge(cls, ic, text) {
 function cardHtml(r) {
   const m = r.meta || {};
   const owner = r.repo.split("/")[0];
+  const pending = buildTasks(r).filter(taskPending).length;
+  const attn = pending > 0 || r.trigs.length > 0;  // 有待做才亮点
   let b = "";
-  if (r.todo.length) b += badge("red", "ball", "该我动 " + r.todo.length);
+  if (pending) b += badge("red", "ball", "待处理 " + pending);
   if (r.trigs.length) b += badge("yellow", "eye", "触发 " + r.trigs.length);
   if (r.stale.length) b += badge("gray", "clock", "晾着 " + r.stale.length);
   if (r.closed.length) b += badge("green", "check", "本周结 " + r.closed.length);
   if (!b) b = badge("gray", "idle", "无动静");
-  return '<div class="card' + (r.unread ? ' unread' : '') + '" data-repo="' + esc(r.repo) + '"'
+  return '<div class="card' + (attn ? ' unread' : '') + '" data-repo="' + esc(r.repo) + '"'
     + ' draggable="true" ondragstart="dragStart(event)" ondragover="dragOverCard(event)"'
     + ' ondragend="dragEnd()" onclick="openModal(\'' + esc(r.repo) + '\')">'
     + '<h3><span class="owner">' + esc(owner) + '/</span>' + esc(shortRepo(r.repo)) + '</h3>'
@@ -1109,6 +1111,9 @@ function buildTasks(r) {
     (b.mine - a.mine) || (b.unread - a.unread) || (b.open - a.open)
     || (a.lastTs < b.lastTs ? 1 : -1));
 }
+// "待处理"判定:开着、没被手动压下去、且(该我动/有新动静/手动拉回)
+function taskPending(t) { return t.open && !t.done && (t.mine || t.unread || t.flagged); }
+
 function taskStatus(t) {
   if (t.mine) return ["该我动", "red"];
   if (t.open) {
@@ -1239,11 +1244,10 @@ function renderModal() {
     h += '<div class="thead"><span>状态</span><span>种类</span><span>领域</span>'
       + '<span>Issue</span><span>PR</span><span></span>'
       + '<span style="text-align:right">最后动静</span></div>';
-    // 三分区:待处理(该我动/有新动静/手动拉回,且没被标已处理)最前,已解决最后
-    const pend = t => t.open && !t.done && (t.mine || t.unread || t.flagged);
+    // 三分区:待处理最前,已解决最后
     const groups = [
-      ['待处理', shown.filter(pend)],
-      ['等待中', shown.filter(t => t.open && !pend(t))],
+      ['待处理', shown.filter(taskPending)],
+      ['等待中', shown.filter(t => t.open && !taskPending(t))],
       ['已解决', shown.filter(t => !t.open)],
     ];
     for (const [label, list] of groups) {
@@ -1324,7 +1328,8 @@ function render() {
      (D.last_sweep_errors && D.last_sweep_errors.length ? "上轮扫描告警:\n" + D.last_sweep_errors.join("\n") : ""));
 
   // 汇总行(pending 收编入口也收在这行,不单独占版面)+ 项目卡片
-  const nUnread = [].concat(D.todo, D.stale, D.closed_week, D.idle).filter(i => i.unread).length;
+  const nUnread = [].concat(D.todo, D.stale, D.closed_week, D.idle)
+    .filter(i => i.unread && i.state === "OPEN").length;
   let sh = '<span>' + icon("ball") + '球在我这 <b>' + D.todo.length + '</b></span>'
     + '<span>' + icon("eye") + '盯梢触发 <b>' + D.watch_triggers.length + '</b></span>'
     + '<span>' + icon("clock") + '晾着 <b>' + D.stale.length + '</b></span>'
