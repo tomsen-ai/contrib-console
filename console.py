@@ -708,10 +708,14 @@ PAGE = r"""<!doctype html>
   .overlay { position: fixed; inset: 0; background: rgba(4,5,7,.62); z-index: 10;
              backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px);
              display: flex; align-items: flex-start; justify-content: center;
-             padding: 52px 18px; overflow-y: auto; }
+             padding: 48px 18px; }
   .modal { background: #101114; border: 1px solid var(--line2); border-radius: 12px;
-           width: 100%; max-width: 820px; padding: 4px 24px 22px; margin-bottom: 40px;
-           box-shadow: 0 24px 80px rgba(0,0,0,.55); }
+           width: 100%; max-width: 860px; padding: 4px 24px 14px;
+           box-shadow: 0 24px 80px rgba(0,0,0,.55);
+           display: flex; flex-direction: column; max-height: calc(100vh - 120px); }
+  .mbody { overflow-y: auto; min-height: 0; margin: 0 -6px; padding: 0 6px 6px; }
+  .mbody::-webkit-scrollbar { width: 8px; }
+  .mbody::-webkit-scrollbar-thumb { background: rgba(255,255,255,.12); border-radius: 4px; }
   .mhead { display: flex; align-items: center; gap: 12px; margin-top: 18px; }
   .mhead h3 { font-size: 14px; margin: 0; font-weight: 600; }
   .mhead .cmeta { color: var(--dim); font-size: 12px; min-width: 0;
@@ -719,18 +723,24 @@ PAGE = r"""<!doctype html>
   .mclose { margin-left: auto; }
   .mbar { display: flex; align-items: center; gap: 6px; padding: 14px 0 0; }
   .mbar .mrepo { color: var(--faint); font-size: 12px; }
-  .thead, .tr1 { display: grid; grid-template-columns: 76px minmax(0,1fr) 92px 120px 78px;
+  .thead, .tr1 { display: grid; grid-template-columns: 64px 44px minmax(0,1fr) 86px 112px 64px;
                  gap: 10px; align-items: center; }
   .thead { color: var(--faint); font-size: 11px; border-bottom: 1px solid var(--line);
-           padding: 6px 12px; margin-top: 12px; }
-  .trow { padding: 9px 12px 10px; border-radius: 8px; cursor: pointer; transition: background .12s; }
+           padding: 6px 12px; position: sticky; top: 0; background: #101114; z-index: 1; }
+  .trow { padding: 8px 12px; border-radius: 8px; cursor: pointer; transition: background .12s; }
   .trow + .trow { border-top: 1px solid rgba(255,255,255,.04); }
   .trow:hover { background: rgba(255,255,255,.035); }
   .trow.unread { background: rgba(94,106,210,.07); box-shadow: inset 2px 0 0 var(--accent); }
   .trow.unread:hover { background: rgba(94,106,210,.11); }
-  .tr2 { color: var(--faint); font-size: 12px; margin-top: 3px; padding-left: 86px;
-         overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .tr2 b { color: var(--dim); font-weight: 500; }
+  .tkindcol { color: var(--faint); font-size: 12px; }
+  .tgroup { color: var(--faint); font-size: 11px; font-weight: 600; letter-spacing: .06em;
+            padding: 14px 12px 3px; }
+  .fbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 2px 0; }
+  .fchip { cursor: pointer; font-size: 11px; padding: 1px 9px; border-radius: 10px;
+           background: rgba(255,255,255,.05); color: var(--dim); border: 1px solid transparent; }
+  .fchip:hover { color: var(--fg); }
+  .fchip.on { color: var(--accent); background: rgba(94,106,210,.13);
+              border-color: rgba(94,106,210,.4); }
   .ttitle { font-size: 12.5px; font-weight: 500; min-width: 0; overflow: hidden;
             text-overflow: ellipsis; white-space: nowrap; }
   .ttitle .ic { width: 12px; height: 12px; color: var(--yellow); vertical-align: -2px; }
@@ -742,7 +752,8 @@ PAGE = r"""<!doctype html>
   .chip.cmerged { color: #a78bfa; }
   .chip.cclosed { color: var(--faint); }
   .chip.cunread { color: var(--accent); background: rgba(94,106,210,.13); }
-  .tdetail { margin: 2px 0 10px 10px; padding: 2px 4px; border-left: 2px solid var(--line); }
+  .tdetail { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+             margin: 6px 2px 12px; padding: 8px 10px; }
   .tlog { margin: 6px 4px 2px 18px; }
   .tlogrow { display: flex; gap: 10px; align-items: baseline; font-size: 12px;
              color: var(--dim); padding: 2px 0; }
@@ -774,6 +785,7 @@ let pendingOpen = false;   // 收编弹层
 let adoptRepo = null;      // 正在填收编表单的 repo
 let expandedTask = null;   // 任务表里展开详情的任务 key
 let watchFormOpen = false; // 添加盯梢表单是否展开
+let taskFilter = null;     // 顶部标签筛选(种类/领域)
 
 // 手绘 SVG 图标(16x16 线稿)
 const ICONS = {
@@ -983,11 +995,12 @@ function cardHtml(r) {
 }
 
 function openModal(repo) {
-  pendingOpen = false; openRepo = repo; expandedTask = null; watchFormOpen = false;
+  pendingOpen = false; openRepo = repo; expandedTask = null; watchFormOpen = false; taskFilter = null;
   renderModal();
 }
 function closeModal() {
-  openRepo = null; pendingOpen = false; adoptRepo = null; expandedTask = null; watchFormOpen = false;
+  openRepo = null; pendingOpen = false; adoptRepo = null; expandedTask = null;
+  watchFormOpen = false; taskFilter = null;
   document.getElementById("modalroot").innerHTML = "";
 }
 function toggleTask(key) { expandedTask = expandedTask === key ? null : key; renderModal(); }
@@ -1075,17 +1088,32 @@ function taskLog(t) {
     + esc((e.summary || '').slice(0, 90)) + '</span></div>').join('') + '</div>';
 }
 
-// 第二行只给需要看的行:有变化/该我动 → 谁说了什么;有盯梢备注 → 备注。安静的行保持单行。
-function taskSub(t) {
-  const parts = [];
-  if ((t.unread || t.mine) && t.last && t.last.last_actor) {
-    const sum = (t.last.last_activity_summary || '').slice(0, 60);
-    parts.push('<b>' + esc(t.last.last_actor) + '</b>' + (sum ? ' — ' + esc(sum) : ''));
-  }
-  const notes = t.list.filter(i => i.my_role === 'watcher' && i.note).map(i => i.note);
-  if (notes.length) parts.push('<span class="note">⟪' + esc(notes.join(';')) + '⟫</span>');
-  return parts.join(' ');
+// 极简列表行:只标种类和领域,细节全在点击后的详情卡片里
+function taskKind(t) {
+  const has = re => t.list.some(i => re.test(i.title || ''));
+  if (has(/^\[bug\]/i) || has(/^fix[(:]/i)) return '修复';
+  if (has(/^\[feature\]/i) || has(/^feat[(:]/i)) return '功能';
+  if (has(/^refactor/i)) return '重构';
+  if (has(/^perf[(:]/i)) return '性能';
+  if (has(/^docs?[(:]/i)) return '文档';
+  return t.issues.length ? '问题' : 'PR';
 }
+function taskDomain(t) {
+  for (const it of t.prs) {
+    const m = /^\w+\(([^)]+)\):/.exec(it.title || '');
+    if (m) return m[1];
+  }
+  for (const it of t.list) {
+    const s = cleanTitle(it.title);
+    let m = /^([\w.-]{2,24}):\s/.exec(s);
+    if (m) return m[1];
+    m = /\b([a-z0-9]+(?:-[a-z0-9]+)+)\b/i.exec(s);
+    if (m) return m[1];
+  }
+  const s = cleanTitle(t.title);
+  return s.length > 26 ? s.slice(0, 26) + '…' : s;
+}
+function setTaskFilter(f) { taskFilter = taskFilter === f ? null : f; renderModal(); }
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
 
 function section(title, html) { return html ? '<h2>' + title + '</h2>' + html : ''; }
@@ -1099,7 +1127,7 @@ function renderModal() {
       + '<div class="mhead"><h3>发现的新 repo</h3>'
       + '<span class="cmeta">收编 = 进白名单开始采集;忽略 = 永不再提</span>'
       + '<button class="mclose" onclick="closeModal()">' + icon("x") + '关闭</button></div>'
-      + '<div style="margin-top:12px">';
+      + '<div class="mbody" style="margin-top:12px">';
     for (const repo of pend) {
       if (adoptRepo === repo) {
         h += '<form class="inline" data-repo="' + esc(repo) + '" onsubmit="adoptSubmit(event)">'
@@ -1136,33 +1164,56 @@ function renderModal() {
       + '<input name="note" placeholder="盯梢原因/触发器" size="28">'
       + '<button>添加</button></form>';
   }
+  const tasks = buildTasks(r);
+
+  // 标签筛选条(种类 + 领域,点击过滤,再点取消)
+  const facets = [...new Set([].concat(tasks.map(taskKind), tasks.map(taskDomain)))];
+  if (tasks.length > 3) {
+    h += '<div class="fbar">' + facets.map(f =>
+      '<span class="fchip' + (taskFilter === f ? ' on' : '') + '" onclick="setTaskFilter(\''
+      + esc(f) + '\')">' + esc(f) + '</span>').join('') + '</div>';
+  }
+
+  h += '<div class="mbody">';
   h += section(icon("eye") + '盯梢触发 <span class="count">' + r.trigs.length + '</span>',
                r.trigs.map(trigRow).join(''));
-  const tasks = buildTasks(r);
-  if (tasks.length) {
-    h += '<div class="thead"><span>状态</span><span>任务</span><span>Issue</span><span>PR</span>'
-      + '<span style="text-align:right">最后动静</span></div>';
-    for (const t of tasks) {
-      const st = taskStatus(t);
-      const sub = taskSub(t);
-      h += '<div class="trow' + (t.unread ? ' unread' : '') + '" onclick="toggleTask(\'' + t.key + '\')">'
-        + '<div class="tr1">'
-        + '<span><span class="pill ' + st[1] + '">' + st[0] + '</span></span>'
-        + '<span class="ttitle">' + (t.watch ? icon("eye") + ' ' : '') + esc(cleanTitle(t.title)) + '</span>'
-        + '<span class="chips">' + t.issues.map(chip).join('') + '</span>'
-        + '<span class="chips">' + t.prs.map(chip).join('') + '</span>'
-        + '<span class="age" style="text-align:right">' + fmtRel(t.lastTs) + '</span></div>'
-        + (sub ? '<div class="tr2">' + sub + '</div>' : '') + '</div>';
-      if (expandedTask === t.key) {
-        h += '<div class="tdetail">' + t.list.map(it =>
-          itemRow(it, {todo: it.ball === 'mine', wait: it.ball === 'theirs'})).join('')
-          + taskLog(t) + '</div>';
+
+  const shown = taskFilter
+    ? tasks.filter(t => taskKind(t) === taskFilter || taskDomain(t) === taskFilter)
+    : tasks;
+  if (shown.length) {
+    h += '<div class="thead"><span>状态</span><span>种类</span><span>领域</span>'
+      + '<span>Issue</span><span>PR</span><span style="text-align:right">最后动静</span></div>';
+    // 三分区:待处理(该我动)最前,等待中居中,已解决最后
+    const groups = [
+      ['待处理', shown.filter(t => t.mine)],
+      ['等待中', shown.filter(t => !t.mine && t.open)],
+      ['已解决', shown.filter(t => !t.open)],
+    ];
+    for (const [label, list] of groups) {
+      if (!list.length) continue;
+      h += '<div class="tgroup">' + label + ' · ' + list.length + '</div>';
+      for (const t of list) {
+        const st = taskStatus(t);
+        h += '<div class="trow' + (t.unread ? ' unread' : '') + '" onclick="toggleTask(\'' + t.key + '\')">'
+          + '<div class="tr1">'
+          + '<span><span class="pill ' + st[1] + '">' + st[0] + '</span></span>'
+          + '<span class="tkindcol">' + taskKind(t) + '</span>'
+          + '<span class="ttitle">' + (t.watch ? icon("eye") + ' ' : '') + esc(taskDomain(t)) + '</span>'
+          + '<span class="chips">' + t.issues.map(chip).join('') + '</span>'
+          + '<span class="chips">' + t.prs.map(chip).join('') + '</span>'
+          + '<span class="age" style="text-align:right">' + fmtRel(t.lastTs) + '</span></div></div>';
+        if (expandedTask === t.key) {
+          h += '<div class="tdetail">' + t.list.map(it =>
+            itemRow(it, {todo: it.ball === 'mine', wait: it.ball === 'theirs'})).join('')
+            + taskLog(t) + '</div>';
+        }
       }
     }
   } else {
-    h += '<div class="empty">该项目暂无条目。</div>';
+    h += '<div class="empty">' + (taskFilter ? '该标签下没有任务。' : '该项目暂无条目。') + '</div>';
   }
-  root.innerHTML = h + '</div></div>';
+  root.innerHTML = h + '</div></div></div>';
 }
 
 function render() {
